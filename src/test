@@ -1,0 +1,143 @@
+#include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEAdvertising.h>
+#include <esp_sleep.h>
+
+// GPIO pins
+#define BTN_1_GPIO 3
+#define BTN_2_GPIO 6
+#define BTN_3_GPIO 7
+#define BTN_4_GPIO 8
+#define BTN_5_GPIO 9
+
+const uint8_t BUTTON_PINS[] = {BTN_1_GPIO, BTN_2_GPIO, BTN_3_GPIO, BTN_4_GPIO, BTN_5_GPIO};
+const uint8_t NUM_BUTTONS = 5;
+
+#define DEVICE_ID 0x01
+#define ACTION_SHORT_PRESS 0x01
+#define ACTION_LONG_PRESS 0x02
+
+#define LONG_PRESS_DURATION_MS 800
+#define ADVERTISING_DURATION_MS 300
+#define MAX_WAIT_TIME_MS 2000
+
+uint8_t wakeupButtonIdx = 255;
+
+void sendBLEAdvertisement(uint8_t btnIdx, uint8_t action) {
+  Serial.print("Sending BLE: Button=");
+  Serial.print(btnIdx + 1);
+  Serial.print(" Action=");
+  Serial.println(action == ACTION_SHORT_PRESS ? "SHORT" : "LONG");
+  
+  BLEDevice::init("SmartBand");
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  
+  pAdvertising->start();
+  delay(ADVERTISING_DURATION_MS);
+  pAdvertising->stop();
+  
+  BLEDevice::deinit(false);
+  
+  Serial.println("BLE sent!");
+}
+
+void enterDeepSleep() {
+  uint64_t wakeupMask = 0;
+  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+    wakeupMask |= (1ULL << BUTTON_PINS[i]);
+  }
+
+  Serial.println("Entering deep sleep...");
+  Serial.flush();
+  
+  esp_sleep_enable_ext1_wakeup(wakeupMask, ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_deep_sleep_start();
+}
+
+void setup() {
+  delay(100000);
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n\n=== BOOT ===");
+
+  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+    pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+  }
+
+  delay(100);
+
+  // Sprawdź wake reason
+  esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+  
+  if (wakeupCause == ESP_SLEEP_WAKEUP_EXT1) {
+    uint64_t wakeupPin = esp_sleep_get_ext1_wakeup_status();
+    Serial.print("Woken by GPIO: 0x");
+    Serial.println(wakeupPin, HEX);
+
+    for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+      if (wakeupPin & (1ULL << BUTTON_PINS[i])) {
+        wakeupButtonIdx = i;
+        Serial.print("Button ");
+        Serial.print(i + 1);
+        Serial.println(" detected!");
+        break;
+      }
+    }
+  } else {
+    Serial.println("Reset/power-on detected - entering deep sleep");
+    enterDeepSleep();
+    return;
+  }
+
+  if (wakeupButtonIdx == 255) {
+    Serial.println("No button found!");
+    enterDeepSleep();
+    return;
+  }
+
+  // Czekaj na button release (timeout 2s)
+  Serial.println("Waiting for release...");
+  unsigned long releaseStart = millis();
+  while (digitalRead(BUTTON_PINS[wakeupButtonIdx]) == LOW) {
+    if (millis() - releaseStart > MAX_WAIT_TIME_MS) {
+      Serial.println("Release timeout!");
+      break;
+    }
+    delay(10);
+  }
+  Serial.println("Released!");
+
+  delay(100);
+
+  // Detect long press (timeout 2s)
+  Serial.println("Detecting action...");
+  unsigned long pressStart = millis();
+  uint8_t actionType = ACTION_SHORT_PRESS;
+
+  while (digitalRead(BUTTON_PINS[wakeupButtonIdx]) == LOW) {
+    if (millis() - pressStart > MAX_WAIT_TIME_MS) {
+      Serial.println("Long press timeout!");
+      break;
+    }
+    
+    if (millis() - pressStart >= LONG_PRESS_DURATION_MS) {
+      actionType = ACTION_LONG_PRESS;
+      Serial.println("Long press!");
+      break;
+    }
+    delay(10);
+  }
+
+  Serial.print("Action: ");
+  Serial.println(actionType == ACTION_SHORT_PRESS ? "SHORT" : "LONG");
+
+  sendBLEAdvertisement(wakeupButtonIdx, actionType);
+
+  delay(500);
+  Serial.flush();
+  
+  enterDeepSleep();
+}
+
+void loop() {
+}
