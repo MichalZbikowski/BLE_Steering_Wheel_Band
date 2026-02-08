@@ -16,18 +16,21 @@
 #include <esp_pm.h>
 #include <esp_wifi.h>
 #include <driver/rtc_io.h>
+#include <esp_sleep.h>
 
 // Button pins
-#define BTN_1_GPIO 3
-#define BTN_2_GPIO 6
-#define BTN_3_GPIO 7
-#define BTN_4_GPIO 8
-#define BTN_5_GPIO 9
+// #define BTN_1_GPIO 3
+// #define BTN_2_GPIO 6
+// #define BTN_3_GPIO 7
+// #define BTN_4_GPIO 8
+// #define BTN_5_GPIO 9
 
+#define BTN_1_GPIO 4
+#define BTN_2_GPIO 5
 // Timing constants
 #define LONG_PRESS_DURATION_MS 1000
 #define MAX_WAIT_TIME_MS 5000
-#define DEBOUNCE_MS 50
+#define DEBOUNCE_MS 100  // Increased debounce
 
 // BLE UUIDs
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -45,8 +48,10 @@ enum ActionType {
 };
 
 // Button configuration
-const uint8_t BUTTON_PINS[] = {BTN_1_GPIO, BTN_2_GPIO, BTN_3_GPIO, BTN_4_GPIO, BTN_5_GPIO};
-const uint8_t NUM_BUTTONS = 5;
+//const uint8_t BUTTON_PINS[] = {BTN_1_GPIO, BTN_2_GPIO, BTN_3_GPIO, BTN_4_GPIO, BTN_5_GPIO};
+const uint8_t BUTTON_PINS[] = {BTN_1_GPIO, BTN_2_GPIO};
+
+const uint8_t NUM_BUTTONS = 2;
 
 // BLE objects
 BLEServer* pServer = NULL;
@@ -76,10 +81,10 @@ void printPowerStats();
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  
+
   Serial.println("\n=================================");
   Serial.println("Ultra Low Power Button Handler");
-  Serial.println("ESP32-S3 + BLE");
+  Serial.println("ESP32-S3 + BLE + Deep Sleep");
   Serial.println("=================================\n");
 
   // Disable WiFi to save power (we only use BLE)
@@ -90,47 +95,69 @@ void setup() {
   // Configure button pins with internal pull-up
   for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
     pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+    rtc_gpio_pullup_en((gpio_num_t)BUTTON_PINS[i]);  // Ensure pull-up during deep sleep
   }
   Serial.println("✓ Buttons configured");
 
-  // Configure automatic power management
-  configurePowerManagement();
+  // Check wakeup cause
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
-  // Initialize BLE with power optimization
-  initBLE();
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) {
+    // Woken by button press - stay awake for 5 seconds to allow connection and button presses
+    Serial.println("✓ Woken by button press - staying awake for 5 seconds");
 
-  Serial.println("\n=================================");
-  Serial.println("Ready! Press any button...");
-  Serial.println("Power optimization: ACTIVE");
-  Serial.println("=================================\n");
-  
-  printPowerStats();
+    // Initialize BLE quickly
+    initBLE();
+
+    // Stay awake for 5 seconds to allow app connection and button presses
+    unsigned long wakeStart = millis();
+    while (millis() - wakeStart < 5000) {
+      // Poll buttons during wake period
+      for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+        if (digitalRead(BUTTON_PINS[i]) == LOW) {
+          handleButtonPress(i);
+          delay(100); // Avoid multiple triggers
+          break;
+        }
+      }
+      delay(50); // Small delay between polls
+    }
+
+    Serial.println("Wake period ended");
+  } else {
+    // Normal startup
+    Serial.println("✓ Normal startup");
+
+    // Configure automatic power management
+    configurePowerManagement();
+
+    // Initialize BLE with power optimization
+    initBLE();
+
+    Serial.println("\n=================================");
+    Serial.println("Ready! Press any button...");
+    Serial.println("Power optimization: ACTIVE (Deep Sleep)");
+    Serial.println("=================================\n");
+
+    printPowerStats();
+  }
+
+  // Set up ext1 wakeup for all buttons (low level trigger)
+  uint64_t ext1_wakeup_mask = 0;
+  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
+    ext1_wakeup_mask |= (1ULL << BUTTON_PINS[i]);
+  }
+  esp_sleep_enable_ext1_wakeup(ext1_wakeup_mask, ESP_EXT1_WAKEUP_ANY_LOW);
+  Serial.println("✓ Deep sleep wakeup configured");
+
+  Serial.println("Entering deep sleep...");
+  delay(100); // Allow serial to flush
+  esp_deep_sleep_start();
 }
 
 void loop() {
-  // Check all buttons
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    if (digitalRead(BUTTON_PINS[i]) == LOW) {
-      handleButtonPress(i);
-      delay(100); // Avoid multiple triggers
-      break;
-    }
-  }
-
-  // Handle BLE connection state changes
-  if (!deviceConnected && oldDeviceConnected) {
-    Serial.println("Restarting advertising...");
-    delay(500);
-    pServer->startAdvertising();
-    oldDeviceConnected = deviceConnected;
-  }
-  
-  if (deviceConnected && !oldDeviceConnected) {
-    oldDeviceConnected = deviceConnected;
-  }
-
-  // Small delay, ESP32 will automatically enter light sleep
-  delay(50);
+  // Device enters deep sleep in setup(), so loop() is never reached
+  // This function is required by Arduino framework but unused
 }
 
 void handleButtonPress(uint8_t buttonIdx) {
@@ -274,15 +301,15 @@ void configurePowerManagement() {
 
 void printPowerStats() {
   Serial.println("\n--- Power Optimization Summary ---");
-  Serial.println("CPU: 40-80MHz automatic scaling");
+  Serial.println("CPU: 40-80MHz automatic scaling (when active)");
   Serial.println("BLE: 0dBm TX power (low)");
-  Serial.println("Sleep: Automatic light sleep");
+  Serial.println("Sleep: Deep sleep with ext1 wakeup");
   Serial.println("Connection interval: 1000ms");
   Serial.println("Advertising: 500-1000ms intervals");
   Serial.println("WiFi: Disabled");
   Serial.println("\nEstimated consumption:");
-  Serial.println("  Active (button press): ~30-50mA");
-  Serial.println("  Idle (waiting): ~0.5-2mA");
-  Serial.println("  Battery life (3000mAh): 2-3 months (stable connection)");
+  Serial.println("  Active (button press + BLE): ~30-50mA for ~1-2s");
+  Serial.println("  Deep sleep: ~0.01-0.05mA");
+  Serial.println("  Battery life (3000mAh): 6-12 months");
   Serial.println("-----------------------------------\n");
 }

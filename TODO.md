@@ -1,0 +1,4 @@
+- [x] Update includes to add esp_sleep.h
+- [x] Modify setup() to handle wakeup causes: check if GPIO wake, detect button and long press, send BLE action, then deep sleep; else init BLE, set ext1 wakeup, deep sleep
+- [x] Remove or empty loop() function
+- [x] Update comments, power settings, and printPowerStats() for deep sleep (estimated 6-12 months battery life)
